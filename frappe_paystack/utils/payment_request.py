@@ -80,10 +80,47 @@ def build_payment_request(doc: Any, amount: float, email: Optional[str] = None) 
         "return_doc": True,
     }
     account = gateway_account(doc.get("company"))
-    if account:
-        args["payment_gateway_account"] = account
+
+    # Throw before make_payment_request touches the database. With
+    # Accounts Settings.create_pr_in_draft_status enabled, make_payment_request
+    # inserts a draft Payment Request itself; throwing afterwards would strand
+    # an unsubmitted, gateway-less draft that every later attempt reuses --
+    # wedging the payment button permanently.
+    if not account:
+        frappe.throw(
+            _(
+                "No Payment Gateway Account is set up for {0}. "
+                "Save the Paystack Gateway Setting to create one."
+            ).format(doc.get("company"))
+        )
+
+    args["payment_gateway_account"] = account
 
     request = make_payment_request(**args)
+
+    # make_payment_request reuses an existing draft for the same reference
+    # document and refreshes none of its fields, so a draft created while no
+    # gateway account existed comes back with an empty payment_gateway.
+    # payment_gateway is a ReadOnly field that only make_payment_request ever
+    # populates, so setting payment_gateway_account alone would not fill it --
+    # the fields have to be written explicitly.
+    if not request.payment_gateway:
+        gateway = frappe.db.get_value(
+            "Payment Gateway Account",
+            account,
+            ["name", "payment_gateway", "payment_account", "payment_channel", "message"],
+            as_dict=True,
+        )
+        if gateway:
+            request.payment_gateway_account = gateway.name
+            request.payment_gateway = gateway.payment_gateway
+            request.payment_account = gateway.payment_account
+            request.payment_channel = gateway.payment_channel or "Email"
+            if gateway.message:
+                request.message = gateway.message
+            if not request.get("__unsaved"):
+                request.flags.ignore_permissions = True
+                request.save()
 
     # get_payment_url() reads the gateway an account puts on the request.
     if not request.payment_gateway:

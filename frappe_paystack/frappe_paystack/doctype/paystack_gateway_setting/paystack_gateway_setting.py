@@ -7,7 +7,7 @@ import frappe
 from frappe import _
 from frappe.integrations.utils import create_request_log
 from frappe.model.document import Document
-from frappe.utils import call_hook_method, flt, get_url
+from frappe.utils import flt, get_url
 
 from frappe_paystack.setup import (
     GATEWAY_DOCTYPE,
@@ -271,7 +271,26 @@ class PaystackGatewaySetting(Document):
         try:
             create_payment_gateway_record()
             update_payment_gateway_controller(self.name)
-            call_hook_method("payment_gateway_enabled", gateway="Paystack")
+
+            # Deliberately NOT calling call_hook_method("payment_gateway_enabled").
+            #
+            # ERPNext's implementation of that hook,
+            # erpnext.accounts.utils.create_payment_gateway_account, is invoked
+            # here without a company, so it falls back to
+            # Global Defaults.default_company. When that is a different legal
+            # entity from the one this gateway serves, it can never find or
+            # create the right account and ends its failed lookup with a
+            # user-visible msgprint:
+            #   "Payment Gateway Account not created, please create one manually."
+            # msgprint does not raise, so the except below never fires and
+            # nothing is logged -- making it look like a database problem when
+            # the account is in fact created correctly, three lines down, by
+            # create_payment_gateway_account(), which is company-aware and uses
+            # the configured suspense account.
+            #
+            # Passing company=self.company does silence the message, but only by
+            # making ERPNext create a stray "Paystack - <abbr>" ledger account
+            # first. Dropping the call is the correct fix.
 
             if self.suspense_account:
                 create_payment_gateway_account(
