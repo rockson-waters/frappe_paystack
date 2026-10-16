@@ -81,6 +81,30 @@ class TestPaymentGatewayRegistration(PaystackTestCase):
         self.assertEqual(controller.doctype, "Paystack Gateway Setting")
         self.assertEqual(controller.name, self.gateway_name)
 
+    def test_registering_does_not_call_the_erpnext_gateway_hook(self):
+        """Registration must not invoke ERPNext's payment_gateway_enabled hook.
+
+        That hook -- erpnext.accounts.utils.create_payment_gateway_account --
+        takes a company, and this app used to call it with none, so it fell back
+        to Global Defaults.default_company. When that is a different legal entity
+        from the gateway's own company it can never find or create the right
+        account, and it ends in a user-visible msgprint:
+
+            Payment Gateway Account not created, please create one manually.
+
+        msgprint does not raise, so the app's except never fired and nothing was
+        logged: a cosmetic message that reads like a database fault, while the
+        account is in fact created correctly, company aware, by the app itself
+        three lines later. See UPGRADE-CHECKS.md, issue 2.
+        """
+        setting = frappe.get_doc("Paystack Gateway Setting", self.gateway_name)
+        setting.flags.ignore_permissions = True
+
+        with patch("erpnext.accounts.utils.create_payment_gateway_account") as hook:
+            setting.save()
+
+        hook.assert_not_called()
+
 
 class TestPaymentGatewayAccount(PaystackTestCase):
     """Auto-creation of Payment Gateway Account."""

@@ -611,6 +611,59 @@ class TestPaymentRequestGuards(PaymentRequestTestCase):
 
         self.assertIn(COMPANY_WITHOUT_GATEWAY, str(refused.exception))
 
+    def test_a_missing_gateway_account_is_refused_before_anything_is_written(self) -> None:
+        """A company with no account is refused without stranding a draft.
+
+        make_payment_request inserts a draft Payment Request itself when
+        Accounts Settings.create_pr_in_draft_status is on, and later calls reuse
+        that draft without refreshing its gateway fields. Raising *after* that
+        call therefore left a gateway-less draft behind, and every subsequent
+        attempt reused it and failed identically -- the payment link was wedged
+        for good, behind a message that blamed the gateway account.
+        """
+        self.addCleanup(
+            restore_draft_request_setting,
+            frappe.db.get_single_value(ACCOUNTS_SETTINGS, DRAFT_REQUEST_FIELD),
+        )
+        frappe.db.set_single_value(ACCOUNTS_SETTINGS, DRAFT_REQUEST_FIELD, 1)
+
+        order = self.build_order()
+        order.company = COMPANY_WITHOUT_GATEWAY
+
+        with self.assertRaises(frappe.ValidationError):
+            build_payment_request(order, 1000)
+
+        stranded = frappe.get_all(
+            PAYMENT_REQUEST,
+            filters={
+                "reference_doctype": order.doctype,
+                "reference_name": order.name,
+                "docstatus": 0,
+                "payment_gateway": ["in", ["", None]],
+            },
+            pluck="name",
+        )
+        self.assertEqual(stranded, [], "a gateway-less draft was left behind")
+
+    def test_a_reused_draft_is_repointed_at_the_gateway(self) -> None:
+        """A gateway-less draft left by an earlier failure is repaired, not reused.
+
+        This is the draft a previous attempt left behind when no gateway account
+        existed yet. make_payment_request returns it untouched, so the app has to
+        aim it at the account before submitting rather than trusting the fields it
+        came back with.
+        """
+        order = self.build_order()
+        self.draft_request(order)
+
+        request = build_payment_request(order, 1000, "buyer@example.com")
+
+        self.assertEqual(request.payment_gateway, "Paystack")
+        self.assertEqual(
+            frappe.db.get_value(PAYMENT_REQUEST, request.name, "payment_gateway"),
+            "Paystack",
+        )
+
     def test_an_unsaved_request_is_inserted_before_it_is_submitted(self) -> None:
         """With draft requests switched off, the request is inserted and submitted."""
         self.addCleanup(
